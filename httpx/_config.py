@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import os
-import ssl
-import sys
 import typing
-import warnings
 
 from ._models import Headers
-from ._types import HeaderTypes, TimeoutTypes
+from ._types import CertTypes, HeaderTypes, TimeoutTypes
 from ._urls import URL
 
-__all__ = ["Limits", "Proxy", "SSLContext", "Timeout", "create_ssl_context"]
+if typing.TYPE_CHECKING:
+    import ssl  # pragma: no cover
+
+__all__ = ["Limits", "Proxy", "Timeout", "create_ssl_context"]
 
 
 class UnsetType:
@@ -21,104 +21,52 @@ UNSET = UnsetType()
 
 
 def create_ssl_context(
-    verify: typing.Any = None,
-    cert: typing.Any = None,
+    verify: ssl.SSLContext | str | bool = True,
+    cert: CertTypes | None = None,
     trust_env: bool = True,
-    http2: bool = False,
-) -> ssl.SSLContext:  # pragma: nocover
-    # The `create_ssl_context` helper function is now deprecated
-    # in favour of `httpx.SSLContext()`.
-    if isinstance(verify, bool):
-        ssl_context: ssl.SSLContext = SSLContext(verify=verify)
-        warnings.warn(
-            "The verify=<bool> parameter is deprecated since 0.28.0. "
-            "Use `ssl_context=httpx.SSLContext(verify=<bool>)`."
-        )
-    elif isinstance(verify, str):
-        warnings.warn(
-            "The verify=<str> parameter is deprecated since 0.28.0. "
-            "Use `ssl_context=httpx.SSLContext()` and `.load_verify_locations()`."
-        )
-        ssl_context = SSLContext()
-        if os.path.isfile(verify):
-            ssl_context.load_verify_locations(cafile=verify)
-        elif os.path.isdir(verify):
-            ssl_context.load_verify_locations(capath=verify)
-    elif isinstance(verify, ssl.SSLContext):
-        warnings.warn(
-            "The verify=<ssl context> parameter is deprecated since 0.28.0. "
-            "Use `ssl_context = httpx.SSLContext()`."
-        )
-        ssl_context = verify
-    else:
-        warnings.warn(
-            "`create_ssl_context()` is deprecated since 0.28.0."
-            "Use `ssl_context = httpx.SSLContext()`."
-        )
-        ssl_context = SSLContext()
+) -> ssl.SSLContext:
+    import ssl
+    import warnings
 
-    if cert is not None:
-        warnings.warn(
-            "The `cert=<...>` parameter is deprecated since 0.28.0. "
-            "Use `ssl_context = httpx.SSLContext()` and `.load_cert_chain()`."
-        )
-        if isinstance(cert, str):
-            ssl_context.load_cert_chain(cert)
+    import certifi
+
+    if verify is True:
+        if trust_env and os.environ.get("SSL_CERT_FILE"):  # pragma: nocover
+            ctx = ssl.create_default_context(cafile=os.environ["SSL_CERT_FILE"])
+        elif trust_env and os.environ.get("SSL_CERT_DIR"):  # pragma: nocover
+            ctx = ssl.create_default_context(capath=os.environ["SSL_CERT_DIR"])
         else:
-            ssl_context.load_cert_chain(*cert)
+            # Default case...
+            ctx = ssl.create_default_context(cafile=certifi.where())
+    elif verify is False:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    elif isinstance(verify, str):  # pragma: nocover
+        message = (
+            "`verify=<str>` is deprecated. "
+            "Use `verify=ssl.create_default_context(cafile=...)` "
+            "or `verify=ssl.create_default_context(capath=...)` instead."
+        )
+        warnings.warn(message, DeprecationWarning)
+        if os.path.isdir(verify):
+            return ssl.create_default_context(capath=verify)
+        return ssl.create_default_context(cafile=verify)
+    else:
+        ctx = verify
 
-    return ssl_context
+    if cert:  # pragma: nocover
+        message = (
+            "`cert=...` is deprecated. Use `verify=<ssl_context>` instead,"
+            "with `.load_cert_chain()` to configure the certificate chain."
+        )
+        warnings.warn(message, DeprecationWarning)
+        if isinstance(cert, str):
+            ctx.load_cert_chain(cert)
+        else:
+            ctx.load_cert_chain(*cert)
 
-
-class SSLContext(ssl.SSLContext):
-    def __init__(
-        self,
-        verify: bool = True,
-    ) -> None:
-        import certifi
-
-        # ssl.SSLContext sets OP_NO_SSLv2, OP_NO_SSLv3, OP_NO_COMPRESSION,
-        # OP_CIPHER_SERVER_PREFERENCE, OP_SINGLE_DH_USE and OP_SINGLE_ECDH_USE
-        # by default. (from `ssl.create_default_context`)
-        super().__init__()
-        self._verify = verify
-
-        # Our SSL setup here is similar to the stdlib `ssl.create_default_context()`
-        # implementation, except with `certifi` used for certificate verification.
-        if not verify:
-            self.check_hostname = False
-            self.verify_mode = ssl.CERT_NONE
-            return
-
-        self.verify_mode = ssl.CERT_REQUIRED
-        self.check_hostname = True
-
-        # Use stricter verify flags where possible.
-        if hasattr(ssl, "VERIFY_X509_PARTIAL_CHAIN"):  # pragma: nocover
-            self.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
-        if hasattr(ssl, "VERIFY_X509_STRICT"):  # pragma: nocover
-            self.verify_flags |= ssl.VERIFY_X509_STRICT
-
-        # Default to `certifi` for certificiate verification.
-        self.load_verify_locations(cafile=certifi.where())
-
-        # OpenSSL keylog file support.
-        if hasattr(self, "keylog_filename"):
-            keylogfile = os.environ.get("SSLKEYLOGFILE")
-            if keylogfile and not sys.flags.ignore_environment:
-                self.keylog_filename = keylogfile
-
-    def __repr__(self) -> str:
-        class_name = self.__class__.__name__
-        return f"<{class_name}(verify={self._verify!r})>"
-
-    def __new__(
-        cls,
-        protocol: ssl._SSLMethod = ssl.PROTOCOL_TLS_CLIENT,
-        *args: typing.Any,
-        **kwargs: typing.Any,
-    ) -> "SSLContext":
-        return super().__new__(cls, protocol, *args, **kwargs)
+    return ctx
 
 
 class Timeout:

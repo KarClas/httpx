@@ -379,7 +379,7 @@ class URL:
 
         if ":" in userinfo:
             # Mask any password component.
-            userinfo = f'{userinfo.split(":")[0]}:[secure]'
+            userinfo = f"{userinfo.split(':')[0]}:[secure]"
 
         authority = "".join(
             [
@@ -399,6 +399,22 @@ class URL:
         )
 
         return f"{self.__class__.__name__}({url!r})"
+
+    @property
+    def raw(self) -> tuple[bytes, bytes, int, bytes]:  # pragma: nocover
+        import collections
+        import warnings
+
+        warnings.warn("URL.raw is deprecated.")
+        RawURL = collections.namedtuple(
+            "RawURL", ["raw_scheme", "raw_host", "port", "raw_path"]
+        )
+        return RawURL(
+            raw_scheme=self.raw_scheme,
+            raw_host=self.raw_host,
+            port=self.port,
+            raw_path=self.raw_path,
+        )
 
 
 class QueryParams(typing.Mapping[str, str]):

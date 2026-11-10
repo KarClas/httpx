@@ -13,9 +13,7 @@
 </a>
 </p>
 
-HTTPX is a fully featured HTTP client library for Python 3. It includes **an integrated
-command line client**, has support for both **HTTP/1.1 and HTTP/2**, and provides both **sync
-and async APIs**.
+HTTPX is a fully featured HTTP client library for Python 3. It includes **an integrated command line client**, has support for both **HTTP/1.1 and HTTP/2**, and provides both **sync and async APIs**.
 
 ---
 
@@ -103,7 +101,7 @@ Or, to include the optional HTTP/2 support, use:
 $ pip install httpx[http2]
 ```
 
-HTTPX requires Python 3.8+.
+HTTPX requires Python 3.9+.
 
 ## Documentation
 

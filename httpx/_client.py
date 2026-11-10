@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime
 import enum
 import logging
-import ssl
 import time
 import typing
 import warnings
@@ -34,6 +33,7 @@ from ._transports.default import AsyncHTTPTransport, HTTPTransport
 from ._types import (
     AsyncByteStream,
     AuthTypes,
+    CertTypes,
     CookieTypes,
     HeaderTypes,
     ProxyTypes,
@@ -46,12 +46,10 @@ from ._types import (
     TimeoutTypes,
 )
 from ._urls import URL, QueryParams
-from ._utils import (
-    URLPattern,
-    get_environment_proxies,
-    is_https_redirect,
-    same_origin,
-)
+from ._utils import URLPattern, get_environment_proxies
+
+if typing.TYPE_CHECKING:
+    import ssl  # pragma: no cover
 
 __all__ = ["USE_CLIENT_DEFAULT", "AsyncClient", "Client"]
 
@@ -59,6 +57,38 @@ __all__ = ["USE_CLIENT_DEFAULT", "AsyncClient", "Client"]
 # https://www.python.org/dev/peps/pep-0484/#annotating-instance-and-class-methods
 T = typing.TypeVar("T", bound="Client")
 U = typing.TypeVar("U", bound="AsyncClient")
+
+
+def _is_https_redirect(url: URL, location: URL) -> bool:
+    """
+    Return 'True' if 'location' is a HTTPS upgrade of 'url'
+    """
+    if url.host != location.host:
+        return False
+
+    return (
+        url.scheme == "http"
+        and _port_or_default(url) == 80
+        and location.scheme == "https"
+        and _port_or_default(location) == 443
+    )
+
+
+def _port_or_default(url: URL) -> int | None:
+    if url.port is not None:
+        return url.port
+    return {"http": 80, "https": 443}.get(url.scheme)
+
+
+def _same_origin(url: URL, other: URL) -> bool:
+    """
+    Return 'True' if the given URLs share the same origin.
+    """
+    return (
+        url.scheme == other.scheme
+        and url.host == other.host
+        and _port_or_default(url) == _port_or_default(other)
+    )
 
 
 class UseClientDefault:
@@ -519,8 +549,8 @@ class BaseClient:
         """
         headers = Headers(request.headers)
 
-        if not same_origin(url, request.url):
-            if not is_https_redirect(request.url, url):
+        if not _same_origin(url, request.url):
+            if not _is_https_redirect(request.url, url):
                 # Strip Authorization headers when responses are redirected
                 # away from the origin. (Except for direct HTTP to HTTPS redirects.)
                 headers.pop("Authorization", None)
@@ -584,13 +614,12 @@ class Client(BaseClient):
     sending requests.
     * **cookies** - *(optional)* Dictionary of Cookie items to include when
     sending requests.
-    * **ssl_context** - *(optional)* An SSL certificate used by the requested host
-    to authenticate the client.
+    * **verify** - *(optional)* Either `True` to use an SSL context with the
+    default CA bundle, `False` to disable verification, or an instance of
+    `ssl.SSLContext` to use a custom context.
     * **http2** - *(optional)* A boolean indicating if HTTP/2 support should be
     enabled. Defaults to `False`.
     * **proxy** - *(optional)* A proxy URL where all the traffic should be routed.
-    * **proxies** - *(optional)* A dictionary mapping proxy keys to proxy
-    URLs.
     * **timeout** - *(optional)* The timeout configuration to use when sending
     requests.
     * **limits** - *(optional)* The limits configuration to use.
@@ -614,7 +643,9 @@ class Client(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
-        ssl_context: ssl.SSLContext | None = None,
+        verify: ssl.SSLContext | str | bool = True,
+        cert: CertTypes | None = None,
+        trust_env: bool = True,
         http1: bool = True,
         http2: bool = False,
         proxy: ProxyTypes | None = None,
@@ -626,11 +657,7 @@ class Client(BaseClient):
         event_hooks: None | (typing.Mapping[str, list[EventHook]]) = None,
         base_url: URL | str = "",
         transport: BaseTransport | None = None,
-        trust_env: bool = True,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
-        # Deprecated in favor of `ssl_context`...
-        verify: typing.Any = None,
-        cert: typing.Any = None,
     ) -> None:
         super().__init__(
             auth=auth,
@@ -659,28 +686,25 @@ class Client(BaseClient):
         proxy_map = self._get_proxy_map(proxy, allow_env_proxies)
 
         self._transport = self._init_transport(
-            ssl_context=ssl_context,
+            verify=verify,
+            cert=cert,
+            trust_env=trust_env,
             http1=http1,
             http2=http2,
             limits=limits,
             transport=transport,
-            trust_env=trust_env,
-            # Deprecated in favor of ssl_context...
-            verify=verify,
-            cert=cert,
         )
         self._mounts: dict[URLPattern, BaseTransport | None] = {
             URLPattern(key): None
             if proxy is None
             else self._init_proxy_transport(
                 proxy,
-                ssl_context=ssl_context,
+                verify=verify,
+                cert=cert,
+                trust_env=trust_env,
                 http1=http1,
                 http2=http2,
                 limits=limits,
-                # Deprecated in favor of ssl_context...
-                verify=verify,
-                cert=cert,
             )
             for key, proxy in proxy_map.items()
         }
@@ -693,48 +717,44 @@ class Client(BaseClient):
 
     def _init_transport(
         self,
-        ssl_context: ssl.SSLContext | None = None,
+        verify: ssl.SSLContext | str | bool = True,
+        cert: CertTypes | None = None,
+        trust_env: bool = True,
         http1: bool = True,
         http2: bool = False,
         limits: Limits = DEFAULT_LIMITS,
         transport: BaseTransport | None = None,
-        trust_env: bool = True,
-        # Deprecated in favor of `ssl_context`...
-        verify: typing.Any = None,
-        cert: typing.Any = None,
     ) -> BaseTransport:
         if transport is not None:
             return transport
 
         return HTTPTransport(
-            ssl_context=ssl_context,
+            verify=verify,
+            cert=cert,
+            trust_env=trust_env,
             http1=http1,
             http2=http2,
             limits=limits,
-            verify=verify,
-            cert=cert,
         )
 
     def _init_proxy_transport(
         self,
         proxy: Proxy,
-        ssl_context: ssl.SSLContext | None = None,
+        verify: ssl.SSLContext | str | bool = True,
+        cert: CertTypes | None = None,
+        trust_env: bool = True,
         http1: bool = True,
         http2: bool = False,
         limits: Limits = DEFAULT_LIMITS,
-        trust_env: bool = True,
-        # Deprecated in favor of `ssl_context`...
-        verify: typing.Any = None,
-        cert: typing.Any = None,
     ) -> BaseTransport:
         return HTTPTransport(
-            ssl_context=ssl_context,
+            verify=verify,
+            cert=cert,
+            trust_env=trust_env,
             http1=http1,
             http2=http2,
             limits=limits,
             proxy=proxy,
-            verify=verify,
-            cert=cert,
         )
 
     def _transport_for_url(self, url: URL) -> BaseTransport:
@@ -1308,8 +1328,9 @@ class AsyncClient(BaseClient):
     sending requests.
     * **cookies** - *(optional)* Dictionary of Cookie items to include when
     sending requests.
-    * **ssl_context** - *(optional)* An SSL certificate used by the requested host
-    to authenticate the client.
+    * **verify** - *(optional)* Either `True` to use an SSL context with the
+    default CA bundle, `False` to disable verification, or an instance of
+    `ssl.SSLContext` to use a custom context.
     * **http2** - *(optional)* A boolean indicating if HTTP/2 support should be
     enabled. Defaults to `False`.
     * **proxy** - *(optional)* A proxy URL where all the traffic should be routed.
@@ -1336,7 +1357,8 @@ class AsyncClient(BaseClient):
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
         cookies: CookieTypes | None = None,
-        ssl_context: ssl.SSLContext | None = None,
+        verify: ssl.SSLContext | str | bool = True,
+        cert: CertTypes | None = None,
         http1: bool = True,
         http2: bool = False,
         proxy: ProxyTypes | None = None,
@@ -1350,9 +1372,6 @@ class AsyncClient(BaseClient):
         transport: AsyncBaseTransport | None = None,
         trust_env: bool = True,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
-        # Deprecated in favor of `ssl_context`...
-        verify: typing.Any = None,
-        cert: typing.Any = None,
     ) -> None:
         super().__init__(
             auth=auth,
@@ -1381,14 +1400,13 @@ class AsyncClient(BaseClient):
         proxy_map = self._get_proxy_map(proxy, allow_env_proxies)
 
         self._transport = self._init_transport(
-            ssl_context=ssl_context,
+            verify=verify,
+            cert=cert,
+            trust_env=trust_env,
             http1=http1,
             http2=http2,
             limits=limits,
             transport=transport,
-            # Deprecated in favor of ssl_context
-            verify=verify,
-            cert=cert,
         )
 
         self._mounts: dict[URLPattern, AsyncBaseTransport | None] = {
@@ -1396,13 +1414,12 @@ class AsyncClient(BaseClient):
             if proxy is None
             else self._init_proxy_transport(
                 proxy,
-                ssl_context=ssl_context,
+                verify=verify,
+                cert=cert,
+                trust_env=trust_env,
                 http1=http1,
                 http2=http2,
                 limits=limits,
-                # Deprecated in favor of `ssl_context`...
-                verify=verify,
-                cert=cert,
             )
             for key, proxy in proxy_map.items()
         }
@@ -1414,46 +1431,44 @@ class AsyncClient(BaseClient):
 
     def _init_transport(
         self,
-        ssl_context: ssl.SSLContext | None = None,
+        verify: ssl.SSLContext | str | bool = True,
+        cert: CertTypes | None = None,
+        trust_env: bool = True,
         http1: bool = True,
         http2: bool = False,
         limits: Limits = DEFAULT_LIMITS,
         transport: AsyncBaseTransport | None = None,
-        # Deprecated in favor of `ssl_context`...
-        verify: typing.Any = None,
-        cert: typing.Any = None,
     ) -> AsyncBaseTransport:
         if transport is not None:
             return transport
 
         return AsyncHTTPTransport(
-            ssl_context=ssl_context,
+            verify=verify,
+            cert=cert,
+            trust_env=trust_env,
             http1=http1,
             http2=http2,
             limits=limits,
-            verify=verify,
-            cert=cert,
         )
 
     def _init_proxy_transport(
         self,
         proxy: Proxy,
-        ssl_context: ssl.SSLContext | None = None,
+        verify: ssl.SSLContext | str | bool = True,
+        cert: CertTypes | None = None,
+        trust_env: bool = True,
         http1: bool = True,
         http2: bool = False,
         limits: Limits = DEFAULT_LIMITS,
-        # Deprecated in favor of `ssl_context`...
-        verify: typing.Any = None,
-        cert: typing.Any = None,
     ) -> AsyncBaseTransport:
         return AsyncHTTPTransport(
-            ssl_context=ssl_context,
+            verify=verify,
+            cert=cert,
+            trust_env=trust_env,
             http1=http1,
             http2=http2,
             limits=limits,
             proxy=proxy,
-            verify=verify,
-            cert=cert,
         )
 
     def _transport_for_url(self, url: URL) -> AsyncBaseTransport:
@@ -1708,7 +1723,7 @@ class AsyncClient(BaseClient):
 
         if not isinstance(request.stream, AsyncByteStream):
             raise RuntimeError(
-                "Attempted to send an sync request with an AsyncClient instance."
+                "Attempted to send a sync request with an AsyncClient instance."
             )
 
         with request_context(request=request):
